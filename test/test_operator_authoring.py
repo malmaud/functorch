@@ -5,6 +5,7 @@ import numpy as np
 
 import torch
 from torch import fx
+from functorch import pointwise_operator, compiled_function, partition_with_recompute_fwd_in_bwd
 from functorch import pointwise_operator
 from torch.testing._internal.common_utils import run_tests
 from torch.testing._internal.jit_utils import JitTestCase
@@ -239,6 +240,87 @@ class TestOperatorAuthoring(JitTestCase):
         res = pointwise_fn(bias, y)
         assert torch.allclose(ref, res, atol=1e-3, rtol=1e-3)
 
+
+class TestOpAuthoringWithCompiledFunc(JitTestCase):
+    def timeme(self, name, fn, a, b):
+        print()
+        import time
+        warmup = 50
+        repeats = 500
+        for _ in range(0, warmup):
+            ref = fn(a, b)
+
+        start = time.time()
+        for _ in range(0, repeats):
+            ref = fn(a, b)
+        end = time.time()
+        print(name, "Forward", (end - start)/repeats * 10**6)
+
+
+
+
+        repeats = 500
+        for _ in range(0, warmup):
+            ref = fn(a, b)
+            ref.sum().backward()
+
+        start = time.time()
+        for _ in range(0, repeats):
+            ref = fn(a, b)
+            ref.sum().backward()
+        end = time.time()
+        print(name, "Fwd + Bwd", (end - start)/repeats * 10**6)
+
+
+
+
+    def test_simple(self):
+        def fn(bias, y):
+            x = bias + y
+            return  x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))
+
+        # def fn(a, b):
+        #     return torch.multiply(torch.sin(torch.sin(a)), b)
+
+        # Reference calculation
+        ref_a = torch.rand(64, 76800, requires_grad=True)
+        ref_b = torch.rand(64, 76800, requires_grad=True)
+
+        ref = fn(ref_a, ref_b)
+        ref.sum().backward()
+
+        # Compiled function calculation
+        res_a = ref_a.clone().detach().requires_grad_(True)
+        res_b = ref_b.clone().detach().requires_grad_(True)
+
+        self.timeme("EagerBaseline", fn, ref_a, ref_b)
+
+        # traced_fn = torch.jit.trace(fn, (ref_a, ref_b))
+        # self.timeme("TorchScriptJit", traced_fn, ref_a, ref_b)
+
+        def fwd_compile(fx_module, flat_args):
+            # print(fx_module)
+            return torch.jit.trace(fx_module, flat_args)
+            # jit_module = torch.jit.trace(fx_module, flat_args)
+            # return jit_module
+            # print()
+            # print(jit_module.graph)
+            # torch._C._te.remove_unused_self_argument(jit_module.graph)
+            # print(jit_module.graph)
+            # te_kernel = torch._C._te.TensorExprKernel(jit_module.graph)
+            # print(te_kernel)
+            # return fx_module
+
+        def bwd_compile(fx_module, flat_args):
+            # print(fx_module)
+            return torch.jit.trace(fx_module, flat_args)
+            print("Bwd", fx_module)
+            return fx_module
+
+        compiled_fn = compiled_function(fn, fwd_compile, bwd_compile, partition_with_recompute_fwd_in_bwd)
+        res = compiled_fn(res_a, res_b)
+        self.timeme("EagerCompile", compiled_fn, ref_a, ref_b)
+        assert torch.allclose(ref, res, atol=1e-3, rtol=1e-3)
 
 @unittest.skipIf(not HAS_CUDA, "GPU tests require CUDA")
 class TestOperatorAuthoringGPU(TestOperatorAuthoring):
