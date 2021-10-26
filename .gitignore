@@ -9,3 +9,4 @@ t.py
 .vscode/
 ccache.sh
 *.ipynb
+docs/build
